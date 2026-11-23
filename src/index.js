@@ -1,13 +1,13 @@
 import path from 'node:path';
 import ts from 'typescript';
 import vue from '@vue/language-core';
-import { API, DiagnosticCategory, formatDiagnostics as formatNative } from 'tsrs/sync';
+import { API, DiagnosticCategory, EmitOnly, formatDiagnostics as formatNative } from 'tsrs/sync';
 import { serverFS } from 'tsrs/fs';
 
 const normalize = file => file.replaceAll(path.sep, '/');
 const canonical = file => ts.sys.useCaseSensitiveFileNames ? normalize(file) : normalize(file).toLowerCase();
 
-export function checkProject({ cwd = process.cwd(), project } = {}) {
+export function checkProject({ cwd = process.cwd(), project, emitDeclarationOnly = false, outDir } = {}) {
   cwd = path.resolve(cwd);
   let config = project ? path.resolve(cwd, project) : ts.findConfigFile(cwd, ts.sys.fileExists);
   if (config && ts.sys.directoryExists(config)) config = path.join(config, 'tsconfig.json');
@@ -94,7 +94,14 @@ export function checkProject({ cwd = process.cwd(), project } = {}) {
       throw new Error('Project references are not supported. Check each leaf tsconfig separately.');
     }
 
-    const options = { ...native.options, noEmit: true, allowJs: native.options.allowJs ?? true };
+    const options = { ...native.options, noEmit: !emitDeclarationOnly, allowJs: native.options.allowJs ?? true };
+    if (emitDeclarationOnly) {
+      Object.assign(options, { declaration: true, emitDeclarationOnly: true });
+      if (outDir !== undefined) {
+        options.outDir = normalize(path.resolve(cwd, outDir));
+        options.declarationDir = options.outDir;
+      }
+    }
     // Resolve Vue imports without changing source text or intercepting normal TS imports.
     const resolutionOptions = { ...parsed?.options, allowArbitraryExtensions: true };
     const resolutionCache = ts.createModuleResolutionCache(path.dirname(config), canonical, resolutionOptions);
@@ -125,6 +132,14 @@ export function checkProject({ cwd = process.cwd(), project } = {}) {
       ...program.getSyntacticDiagnostics(), ...program.getSemanticDiagnostics(),
     ];
     diagnostics.push(...nativeDiagnostics.map(d => mapDiagnostic(d, virtual)).filter(Boolean));
+    if (emitDeclarationOnly && !diagnostics.some(d => d.category === DiagnosticCategory.Error)) {
+      const output = program.emitToString(EmitOnly.OnlyDts);
+      // Declaration diagnostics may be attached to synthetic Vue code. Do not silently drop them.
+      diagnostics.push(...output.diagnostics.map(d => mapDiagnostic(d, virtual) ?? declarationDiagnostic(d, virtual)));
+      if (!output.emitSkipped && !diagnostics.some(d => d.category === DiagnosticCategory.Error)) {
+        diagnostics.push(...writeDeclarations(output.outputFiles, program, virtual));
+      }
+    }
     const seen = new Set();
     return diagnostics.filter(d => {
       const key = JSON.stringify([d.fileName, d.startPosition, d.code, d.source, d.text]);
@@ -139,6 +154,78 @@ export function checkProject({ cwd = process.cwd(), project } = {}) {
       for (const { file } of bySource.values()) language.scripts.delete(file);
     }
   }
+}
+
+function declarationDiagnostic(diagnostic, virtual) {
+  const entry = virtual.get(canonical(diagnostic.fileName));
+  return {
+    ...diagnostic, fileName: entry.file, pos: undefined, end: undefined,
+    startPosition: undefined, endPosition: undefined, sourceLines: undefined,
+    relatedInformation: diagnostic.relatedInformation?.map(d => mapDiagnostic(d, virtual) ?? declarationDiagnostic(d, virtual)),
+  };
+}
+
+function writeDeclarations(outputFiles, program, virtual) {
+  const virtualStems = new Set([...virtual.values()].map(entry => canonical(path.basename(entry.name).replace(/\.[jt]sx?$/, ''))));
+  const cleanName = name => {
+    const stem = name.replace(/\.[jt]sx?$/, '');
+    return virtualStems.has(canonical(path.basename(stem))) ? stem.slice(0, -'.__vue_tsrs'.length) : name;
+  };
+  const inputs = new Set(program.getSourceFileNames().map(canonical));
+  const files = new Map();
+  const destinations = new Set();
+  const diagnostics = [];
+  for (const [name, { text, sourceFileName }] of outputFiles) {
+    if (!/\.d\.[cm]?ts$/.test(name)) continue;
+    const isVue = sourceFileName && virtual.has(canonical(sourceFileName));
+    const file = isVue ? name.replace(/\.__vue_tsrs(?=\.d\.ts$)/, '') : name;
+    const key = canonical(file);
+    if (inputs.has(key) || destinations.has(key)) {
+      diagnostics.push({
+        code: inputs.has(key) ? 5055 : 5056, category: DiagnosticCategory.Error,
+        text: `Cannot write file '${file}' because it would overwrite ${inputs.has(key) ? 'an input file' : 'another output file'}.`,
+      });
+      continue;
+    }
+    destinations.add(key);
+    const declaration = cleanDeclaration(text, name, cleanName);
+    const map = outputFiles.get(`${name}.map`);
+    // Native maps describe virtual Vue text (and pre-rewrite declarations).
+    // Keep ordinary TS declaration maps only when neither side was modified.
+    if (map && !isVue && declaration === text && !map.text.includes('.__vue_tsrs')) {
+      files.set(`${file}.map`, map.text);
+      files.set(file, declaration);
+    } else {
+      files.set(file, declaration.replace(/^\/\/# sourceMappingURL=.*(?:\r?\n|$)/gm, ''));
+    }
+  }
+  if (!diagnostics.length) for (const [file, text] of files) ts.sys.writeFile(file, text);
+  return diagnostics;
+}
+
+function cleanDeclaration(text, name, cleanName) {
+  if (!text.includes('.__vue_tsrs')) return text;
+  const source = ts.createSourceFile(name, text, ts.ScriptTarget.Latest, true);
+  const edits = [];
+  function visit(node) {
+    if (ts.isStringLiteral(node) && (
+      node.parent.moduleSpecifier === node ||
+      ts.isExternalModuleReference(node.parent) ||
+      (ts.isLiteralTypeNode(node.parent) && ts.isImportTypeNode(node.parent.parent)) ||
+      (ts.isModuleDeclaration(node.parent) && node.parent.name === node)
+    )) {
+      const raw = node.getText(source);
+      const moduleName = raw.slice(1, -1);
+      const cleaned = raw[0] + cleanName(moduleName) + raw.at(-1);
+      if (cleaned !== raw) edits.push([node.getStart(source), node.end, cleaned]);
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(source);
+  for (const [start, end, replacement] of edits.reverse()) {
+    text = text.slice(0, start) + replacement + text.slice(end);
+  }
+  return text;
 }
 
 function lineIndex(text) {
