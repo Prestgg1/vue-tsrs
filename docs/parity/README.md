@@ -54,3 +54,15 @@ node scripts/bench/compare.mjs "$work/projects/vite" tsconfig.app.json "$work/vi
 Across these three clean leaf checks, `vue-tsrs` took 30–50% less wall time and used 53–62% less peak RSS. Clean results only show both tools accepted the measured inputs. These fixtures do not establish general parity or benchmark build mode, watch mode, declaration output, or the other generated Nuxt configurations.
 
 The separate Vite negative control matched both expected locations: script `TS2322` at `src/Probe.vue(2,7)` and template `TS2339` at `src/Probe.vue(7,57)`. The checker exits differed (`vue-tsc`: 2; `vue-tsrs`: 1), but both were diagnostic exits and the benchmark returned 0. Three timed samples gave 2.38 s / 269,608 KiB for `vue-tsc` and 1.47 s / 142,188 KiB for `vue-tsrs`.
+
+### v0.2.0 follow-up
+
+The updated checker (`665956b`, unchanged by benchmark commit `30bfc04`) matched all three diagnostic sets again with three timed samples per tool, using Vite **with** the negative control and the same Simple Sheet and Nuxt inputs:
+
+| Input | Diagnostics tsc / tsrs | Wall s tsc / tsrs | Peak RSS KiB tsc / tsrs |
+| --- | ---: | ---: | ---: |
+| Vite starter + negative control | 2 / 2 | 3.35 / 1.69 | 298,568 / 141,804 |
+| Simple Sheet | 0 / 0 | 3.29 / 1.52 | 355,356 / 140,344 |
+| Nuxt starter | 0 / 0 | 3.65 / 2.54 | 418,492 / 159,536 |
+
+To rerun these measurements, set `VUE_TSRS_ROOT` to a checkout of `30bfc04` with dependencies installed and use `3` samples for each project. These are leaf-config measurements, not performance claims about watch mode, reference builds, or declaration emit.
