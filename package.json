@@ -1,0 +1,21 @@
+{
+  "name": "vue-tsrs",
+  "version": "0.1.0",
+  "description": "Experimental Vue 3 type checker powered by the Rust TypeScript compiler",
+  "type": "module",
+  "license": "MIT",
+  "engines": { "node": ">=22" },
+  "bin": { "vue-tsrs": "./bin/vue-tsrs.js" },
+  "exports": { ".": { "types": "./src/index.d.ts", "default": "./src/index.js" } },
+  "types": "./src/index.d.ts",
+  "files": ["bin", "src"],
+  "scripts": { "test": "node --test" },
+  "repository": "github:Prestgg1/vue-tsrs",
+  "dependencies": {
+    "@vue/language-core": "3.2.9",
+    "tsrs": "7.1.0-beta.tsrs4",
+    "typescript": "6.0.3"
+  },
+  "peerDependencies": { "vue": "^3.4.0" },
+  "devDependencies": { "vue": "^3.5.0" }
+}
