@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import { once } from 'node:events';
 import { mkdtempSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -72,6 +73,86 @@ test('CLI returns different exit codes for diagnostics and incorrect invocation'
   const failed = invoke('-p', '.', '--noEmit');
   assert.equal(failed.status, 1, failed.stderr);
   assert.match(failed.stdout, /TS2322/);
-  assert.equal(invoke('--watch').status, 2);
+  assert.equal(invoke('--unknown-flag').status, 2);
   assert.equal(invoke('--help').status, 0);
+  assert.match(invoke('--noEmit', '--emitDeclarationOnly').stderr, /cannot be combined/);
+});
+
+test('build declaration mode emits referenced package types into their own directories', t => {
+  const compilerOptions = { target: 'ES2022', module: 'ESNext', moduleResolution: 'Bundler', strict: true, composite: true, outDir: 'types' };
+  const cwd = fixture(t, {
+    'tsconfig.json': JSON.stringify({ files: [], references: [{ path: './lib' }, { path: './app' }] }),
+    'lib/tsconfig.json': JSON.stringify({ compilerOptions, include: ['*.vue', '*.ts'] }),
+    'lib/Widget.vue': '<script setup lang="ts">\ndefineProps<{ title: string }>()\n</script>',
+    'lib/strings.ts': 'export const label = "example";',
+    'app/tsconfig.json': JSON.stringify({ compilerOptions, include: ['*.ts'], references: [{ path: '../lib' }] }),
+    'app/index.ts': 'export { default as Widget } from "../lib/Widget.vue"; export { label } from "../lib/strings";',
+  });
+  const result = spawnSync(process.execPath, [cli, '--build', '--emitDeclarationOnly'], { cwd, encoding: 'utf8' });
+  assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+  assert.deepEqual(readdirSync(join(cwd, 'lib/types')).sort(), ['Widget.vue.d.ts', 'strings.d.ts']);
+  assert.deepEqual(readdirSync(join(cwd, 'app/types')), ['index.d.ts']);
+});
+
+test('build traverses references in dependency order and checks a root solution', t => {
+  const options = { target: 'ES2022', module: 'ESNext', moduleResolution: 'Bundler', strict: true, composite: true };
+  const cwd = fixture(t, {
+    'tsconfig.json': JSON.stringify({ files: [], references: [{ path: './app/tsconfig.app.json' }, { path: './lib' }] }),
+    'app/tsconfig.app.json': JSON.stringify({ compilerOptions: options, include: ['*.vue'], references: [{ path: '../lib' }] }),
+    'lib/tsconfig.json': JSON.stringify({ compilerOptions: options, files: ['number.ts'] }),
+    'app/App.vue': '<script setup lang="ts">\nimport { amount } from "../lib/number"\nconst str: string = amount\n</script>\n<template>{{ str }}</template>',
+    'lib/number.ts': 'export const amount: number = "wrong";',
+  });
+  const result = spawnSync(process.execPath, [cli, '-b', '--noEmit'], { cwd, encoding: 'utf8' });
+  assert.equal(result.status, 1, result.stderr);
+  const files = result.stdout.split('\n').filter(line => line.includes('TS2322')).map(line => line.split('(')[0].replaceAll('\\', '/'));
+  assert.deepEqual(files, ['lib/number.ts', 'app/App.vue'], result.stdout);
+  assert.doesNotMatch(result.stdout, /TS18002|TS18003/);
+});
+
+test('build rejects circular project references', t => {
+  const cwd = fixture(t, {
+    'tsconfig.json': '{"files":[],"references":[{"path":"./app"}]}',
+    'app/tsconfig.json': '{"files":[],"references":[{"path":".."}]}',
+  });
+  const result = spawnSync(process.execPath, [cli, '--build', '.'], { cwd, encoding: 'utf8' });
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /Circular project references.*tsconfig\.json/);
+});
+
+test('watch reports errors after editing a Vue source and recovers after deleting it', { timeout: 20_000 }, async t => {
+  const cwd = fixture(t, { 'App.vue': '<template><div /></template>' });
+  const child = spawn(process.execPath, [cli, '--watch'], { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+  const exit = once(child, 'close');
+  t.after(async () => {
+    if (child.exitCode === null) child.kill();
+    await exit;
+  });
+  const matches = [];
+  let buffer = '';
+  let notify;
+  child.stdout.setEncoding('utf8').on('data', chunk => {
+    buffer += chunk;
+    const lines = buffer.split('\n');
+    buffer = lines.pop();
+    for (const line of lines) {
+      const detected = /vue-tsrs: (\d+) diagnostic/.exec(line);
+      if (detected) matches.push(Number(detected[1]));
+    }
+    notify?.();
+  });
+  const waitFor = async (index, count) => {
+    while (matches.length <= index) {
+      await Promise.race([
+        new Promise(resolve => { notify = resolve; }),
+        exit.then(([code]) => { throw new Error(`Watch exited unexpectedly: ${code}`); }),
+      ]);
+    }
+    assert.equal(matches[index], count);
+  };
+  await waitFor(0, 0);
+  writeFileSync(join(cwd, 'Broken.vue'), '<template>{{ missing }}</template>');
+  await waitFor(1, 1);
+  rmSync(join(cwd, 'Broken.vue'));
+  await waitFor(2, 0);
 });

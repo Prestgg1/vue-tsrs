@@ -7,7 +7,8 @@ import { serverFS } from 'tsrs/fs';
 const normalize = file => file.replaceAll(path.sep, '/');
 const canonical = file => ts.sys.useCaseSensitiveFileNames ? normalize(file) : normalize(file).toLowerCase();
 
-export function checkProject({ cwd = process.cwd(), project, emitDeclarationOnly = false, outDir } = {}) {
+export function checkProject({ cwd = process.cwd(), project, emitDeclarationOnly = false, outDir,
+  followReferences = false, referenceDeclarations, emittedDeclarations } = {}) {
   cwd = path.resolve(cwd);
   let config = project ? path.resolve(cwd, project) : ts.findConfigFile(cwd, ts.sys.fileExists);
   if (config && ts.sys.directoryExists(config)) config = path.join(config, 'tsconfig.json');
@@ -88,13 +89,20 @@ export function checkProject({ cwd = process.cwd(), project, emitDeclarationOnly
     const native = api.parseConfigFile(config);
     const roots = (parsed?.fileNames ?? []).filter(extensionOf).map(file => generate(normalize(file))?.name).filter(Boolean);
     const files = [...new Set([...(native.fileNames ?? []).filter(file => !extensionOf(file)), ...roots])];
-    const errors = (native.errors ?? []).filter(d => ![18002, 18003].includes(d.code) || files.length === 0);
+    const hasReferences = Boolean(parsed?.projectReferences?.length || native.projectReferences?.length);
+    const errors = (native.errors ?? []).filter(d => ![18002, 18003].includes(d.code) || (!files.length && !(followReferences && hasReferences)));
     if (errors.some(d => d.category === DiagnosticCategory.Error)) return errors;
-    if (parsed?.projectReferences?.length || native.projectReferences?.length) {
-      throw new Error('Project references are not supported. Check each leaf tsconfig separately.');
+    if (hasReferences) {
+      if (!followReferences) throw new Error('Use --build to check a tsconfig with project references.');
+      if (!files.length) return errors;
     }
 
     const options = { ...native.options, noEmit: !emitDeclarationOnly, allowJs: native.options.allowJs ?? true };
+    if (hasReferences && !emitDeclarationOnly) {
+      // A no-emit graph checks referenced source directly, not a prebuilt declaration redirect.
+      options.composite = false;
+      delete options.rootDir;
+    }
     if (emitDeclarationOnly) {
       Object.assign(options, { declaration: true, emitDeclarationOnly: true });
       if (outDir !== undefined) {
@@ -106,9 +114,18 @@ export function checkProject({ cwd = process.cwd(), project, emitDeclarationOnly
     const resolutionOptions = { ...parsed?.options, allowArbitraryExtensions: true };
     const resolutionCache = ts.createModuleResolutionCache(path.dirname(config), canonical, resolutionOptions);
     const nativeResolver = api.createModuleResolver(options);
+    const ordinaryModules = new Map();
     const resolver = api.createModuleResolver(options, {
       resolveModuleName(specifier, directory, mode, context) {
-        const fallback = () => nativeResolver.resolveModuleName(specifier, directory, mode, context).resolvedModule;
+        const fallback = () => {
+          const key = JSON.stringify([directory, mode, specifier]);
+          if (!ordinaryModules.has(key)) {
+            const result = nativeResolver.resolveModuleName(specifier, directory, mode, context).resolvedModule;
+            const declaration = result?.resolvedFileName && referenceDeclarations?.get(canonical(result.resolvedFileName));
+            ordinaryModules.set(key, declaration ? { resolvedFileName: declaration } : result);
+          }
+          return ordinaryModules.get(key);
+        };
         const ext = extensionOf(specifier);
         if (!ext) return fallback();
         const probeSuffix = `.d${ext}.ts`;
@@ -122,7 +139,10 @@ export function checkProject({ cwd = process.cwd(), project, emitDeclarationOnly
         }, resolutionCache, undefined, mode || undefined).resolvedModule;
         const resolved = result?.resolvedFileName;
         if (!resolved?.endsWith(probeSuffix)) return fallback();
-        const entry = generate(normalize(resolved.slice(0, -probeSuffix.length) + ext));
+        const source = normalize(resolved.slice(0, -probeSuffix.length) + ext);
+        const declaration = referenceDeclarations?.get(canonical(source));
+        if (declaration) return { resolvedFileName: declaration };
+        const entry = generate(source);
         return entry ? { resolvedFileName: entry.name } : fallback();
       },
     });
@@ -137,7 +157,7 @@ export function checkProject({ cwd = process.cwd(), project, emitDeclarationOnly
       // Declaration diagnostics may be attached to synthetic Vue code. Do not silently drop them.
       diagnostics.push(...output.diagnostics.map(d => mapDiagnostic(d, virtual) ?? declarationDiagnostic(d, virtual)));
       if (!output.emitSkipped && !diagnostics.some(d => d.category === DiagnosticCategory.Error)) {
-        diagnostics.push(...writeDeclarations(output.outputFiles, program, virtual));
+        diagnostics.push(...writeDeclarations(output.outputFiles, program, virtual, emittedDeclarations));
       }
     }
     const seen = new Set();
@@ -165,7 +185,7 @@ function declarationDiagnostic(diagnostic, virtual) {
   };
 }
 
-function writeDeclarations(outputFiles, program, virtual) {
+function writeDeclarations(outputFiles, program, virtual, emittedDeclarations) {
   const virtualStems = new Set([...virtual.values()].map(entry => canonical(path.basename(entry.name).replace(/\.[jt]sx?$/, ''))));
   const cleanName = name => {
     const stem = name.replace(/\.[jt]sx?$/, '');
@@ -173,6 +193,7 @@ function writeDeclarations(outputFiles, program, virtual) {
   };
   const inputs = new Set(program.getSourceFileNames().map(canonical));
   const files = new Map();
+  const redirects = new Map();
   const destinations = new Set();
   const diagnostics = [];
   for (const [name, { text, sourceFileName }] of outputFiles) {
@@ -188,6 +209,7 @@ function writeDeclarations(outputFiles, program, virtual) {
       continue;
     }
     destinations.add(key);
+    if (sourceFileName) redirects.set(canonical(isVue ? virtual.get(canonical(sourceFileName)).file : sourceFileName), file);
     const declaration = cleanDeclaration(text, name, cleanName);
     const map = outputFiles.get(`${name}.map`);
     // Native maps describe virtual Vue text (and pre-rewrite declarations).
@@ -199,7 +221,10 @@ function writeDeclarations(outputFiles, program, virtual) {
       files.set(file, declaration.replace(/^\/\/# sourceMappingURL=.*(?:\r?\n|$)/gm, ''));
     }
   }
-  if (!diagnostics.length) for (const [file, text] of files) ts.sys.writeFile(file, text);
+  if (!diagnostics.length) {
+    for (const [file, text] of files) ts.sys.writeFile(file, text);
+    if (emittedDeclarations) for (const [source, declaration] of redirects) emittedDeclarations.set(source, declaration);
+  }
   return diagnostics;
 }
 
