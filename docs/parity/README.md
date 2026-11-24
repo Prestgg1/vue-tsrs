@@ -1,5 +1,7 @@
 # `vue-tsc` / `vue-tsrs` parity and performance
 
+See also the [native Rust Vue mapper experiment](native.md), which compares the current adapter with direct `tsrs` + Vize.
+
 ## Run against any project
 
 Use Linux with GNU `/usr/bin/time`, and Node.js 22 or newer. Run `npm ci` in the `vue-tsrs` checkout. The target project must already have its dependencies and a local `vue-tsc` installed. Generate framework files first (for example, run `nuxt prepare` for Nuxt).
