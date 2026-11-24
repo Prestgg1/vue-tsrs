@@ -3,6 +3,7 @@ import ts from 'typescript';
 import vue from '@vue/language-core';
 import { API, DiagnosticCategory, EmitOnly, formatDiagnostics as formatNative } from 'tsrs/sync';
 import { serverFS } from 'tsrs/fs';
+import { unusedImportRange } from './vue-diagnostics.js';
 
 const normalize = file => file.replaceAll(path.sep, '/');
 const canonical = file => ts.sys.useCaseSensitiveFileNames ? normalize(file) : normalize(file).toLowerCase();
@@ -46,6 +47,7 @@ export function checkProject({ cwd = process.cwd(), project, emitDeclarationOnly
       name, text, file,
       generatedLines: lineIndex(text),
       sourceLines: lineIndex(source),
+      scriptSetup: root.vueSfc?.descriptor.scriptSetup,
       mapper: language.maps.get(service.code, script),
     };
     virtual.set(canonical(name), entry);
@@ -283,7 +285,7 @@ function mapDiagnostic(diagnostic, virtual) {
     return !!rule && (typeof rule !== 'object' || (rule.shouldReport?.(diagnostic.source, diagnostic.code) ?? true));
   }).next().value;
   if (!range) return;
-  const [pos, mappedEnd] = range;
+  const [pos, mappedEnd] = diagnostic.code === 6133 ? unusedImportRange(entry.scriptSetup, range[0]) ?? range : range;
   return {
     ...diagnostic, fileName: entry.file, pos, end: mappedEnd,
     startPosition: entry.sourceLines.position(pos), endPosition: entry.sourceLines.position(mappedEnd),

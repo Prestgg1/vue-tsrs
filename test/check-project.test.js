@@ -6,6 +6,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { checkProject, formatDiagnostics } from '../src/index.js';
+import { normalizeVizeOutput, nativeExitCode } from '../src/native.js';
 
 const cli = fileURLToPath(new URL('../bin/vue-tsrs.js', import.meta.url));
 
@@ -71,9 +72,9 @@ test('CLI returns different exit codes for diagnostics and incorrect invocation'
   const cwd = fixture(t, { 'main.ts': 'const answer: string = 42;' });
   const invoke = (...args) => spawnSync(process.execPath, [cli, ...args], { cwd, encoding: 'utf8' });
   const failed = invoke('-p', '.', '--noEmit');
-  assert.equal(failed.status, 1, failed.stderr);
+  assert.equal(failed.status, 2, failed.stderr);
   assert.match(failed.stdout, /TS2322/);
-  assert.equal(invoke('--unknown-flag').status, 2);
+  assert.equal(invoke('--unknown-flag').status, 1);
   assert.equal(invoke('--help').status, 0);
   assert.match(invoke('--noEmit', '--emitDeclarationOnly').stderr, /cannot be combined/);
 });
@@ -85,7 +86,7 @@ test('Vize is optional and experimental flags cannot affect default checks', t =
   assert.match(invoke('--backend', 'unknown').stderr, /expects volar or vize/);
   for (const mode of ['--watch', '--build', '--emitDeclarationOnly']) {
     const result = invoke('--backend', 'vize', mode);
-    assert.equal(result.status, 2);
+    assert.equal(result.status, 1);
     assert.match(result.stderr, /one-shot no-emit/);
   }
   assert.equal(invoke('--backend', 'volar').status, 0);
@@ -117,7 +118,7 @@ test('build traverses references in dependency order and checks a root solution'
     'lib/number.ts': 'export const amount: number = "wrong";',
   });
   const result = spawnSync(process.execPath, [cli, '-b', '--noEmit'], { cwd, encoding: 'utf8' });
-  assert.equal(result.status, 1, result.stderr);
+  assert.equal(result.status, 2, result.stderr);
   const files = result.stdout.split('\n').filter(line => line.includes('TS2322')).map(line => line.split('(')[0].replaceAll('\\', '/'));
   assert.deepEqual(files, ['lib/number.ts', 'app/App.vue'], result.stdout);
   assert.doesNotMatch(result.stdout, /TS18002|TS18003/);
@@ -129,7 +130,7 @@ test('build rejects circular project references', t => {
     'app/tsconfig.json': '{"files":[],"references":[{"path":".."}]}',
   });
   const result = spawnSync(process.execPath, [cli, '--build', '.'], { cwd, encoding: 'utf8' });
-  assert.equal(result.status, 2);
+  assert.equal(result.status, 1);
   assert.match(result.stderr, /Circular project references.*tsconfig\.json/);
 });
 
@@ -168,4 +169,48 @@ test('watch reports errors after editing a Vue source and recovers after deletin
   await waitFor(1, 1);
   rmSync(join(cwd, 'Broken.vue'));
   await waitFor(2, 0);
+});
+
+test('TS6133 points to the import keyword for one unused Vue import, not a partial import or local', async t => {
+  const cwd = fixture(t, {
+    'Parent.vue': [
+      '<script setup lang="ts">', 'import { ref } from "vue"', 'const n = ref(1)',
+      'import { nothing } from "~/does/not/exist"', 'import { computed, shallowRef } from "vue"',
+      'const doubled = computed(() => n.value * 2)', 'const unused = 1', '</script>',
+      '<template>{{ doubled }}</template>',
+    ].join('\n'),
+  }, { compilerOptions: { target: 'ES2022', module: 'ESNext', moduleResolution: 'Bundler', strict: true, noUnusedLocals: true } });
+  const output = formatDiagnostics(checkProject({ cwd }), cwd);
+  const unused = output.split('\n').filter(line => line.includes('TS6133')).join('\n');
+  assert.match(unused, /Parent\.vue\(4,1\): error TS6133: 'nothing'/);
+  assert.match(unused, /Parent\.vue\(5,20\): error TS6133: 'shallowRef'/);
+  assert.match(unused, /Parent\.vue\(7,7\): error TS6133: 'unused'/);
+  const input = [
+    "Parent.vue(4,10): error TS6133: 'nothing' is declared but its value is never read.",
+    "Parent.vue(5,20): error TS6133: 'shallowRef' is declared but its value is never read.",
+    "Parent.vue(7,7): error TS6133: 'unused' is declared but its value is never read.",
+  ].join('\n');
+  assert.equal(await normalizeVizeOutput(input, cwd), input.replace('(4,10)', '(4,1)'));
+});
+
+test('Vize diagnostics hide generated template and child prop type names', async t => {
+  const cwd = fixture(t, {});
+  const input = [
+    "Parent.vue(12,11): error TS2339: Property 'missing' does not exist on type '$TemplateInstance'.",
+    "Parent.vue(11,4): error TS2345: Argument of type '{ count: number; }' is not assignable to parameter of type '$ComponentCheckProps<__Child_CheckProps_1, VueTemplatePublicAttrsType & Record<string, unknown>>'.",
+    "  Type 'ComponentPropsForTemplate<__Child_CheckProps_1>' requires a 'label' property.",
+    "plain.ts(1,1): error TS2339: Property 'x' does not exist on type '$TemplateInstance'.",
+  ].join('\n');
+  const [instance, props, related, plain] = (await normalizeVizeOutput(input, cwd)).split('\n');
+  assert.match(instance, /'missing'.*Vue component instance/);
+  assert.match(props, /'\{ count: number; \}'.*Child props/);
+  assert.doesNotMatch(instance + props + related, /\$TemplateInstance|\$ComponentCheckProps|__Child|VueTemplatePublicAttrsType|ComponentPropsForTemplate/);
+  assert.equal(plain, input.split('\n')[3]);
+});
+
+test('native diagnostic exits match vue-tsc', () => {
+  assert.equal(nativeExitCode(0, ''), 0);
+  assert.equal(nativeExitCode(2, 'Parent.vue(4,1): error TS6133: Unused import.'), 2);
+  assert.equal(nativeExitCode(1, 'Parent.vue(4,1): error TS6133: Unused import.'), 2);
+  assert.equal(nativeExitCode(1, 'native launcher failed'), 1);
 });

@@ -66,13 +66,13 @@ try {
     }
     if (backend === 'vize') {
       const { runNative } = await import('../src/native.js');
-      process.exitCode = runNative({ cwd: options.cwd, project: options.projects[0], fast });
+      process.exitCode = await runNative({ cwd: options.cwd, project: options.projects[0], fast });
     } else {
       const { checkProject, formatDiagnostics } = await import('../src/index.js');
       const { checkGraph, projectGraph, watchProjects } = await import('../src/projects.js');
       const report = diagnostics => {
         process.stdout.write(formatDiagnostics(diagnostics));
-        process.exitCode = diagnostics.some(d => d.category === 1) ? 1 : 0;
+        process.exitCode = diagnostics.some(d => d.category === 1) ? 2 : 0;
         if (watch) process.stdout.write(`vue-tsrs: ${diagnostics.length} diagnostic(s). Watching for changes.\n`);
       };
       if (watch) {
@@ -92,5 +92,5 @@ try {
 
 function reportError(error) {
   console.error(`vue-tsrs: ${error.message}`);
-  process.exitCode = 2;
+  process.exitCode = 1;
 }

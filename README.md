@@ -17,7 +17,7 @@ npx vue-tsrs --build --watch
 npx vue-tsrs --emitDeclarationOnly -p tsconfig.lib.json --outDir dist/types
 ```
 
-Run without `-p` to use the nearest `tsconfig.json`. For Vue template checks, enable `vueCompilerOptions.strictTemplates` in the project's tsconfig. CLI exit codes: `0` on success, `1` for type or configuration errors, `2` for invocation or runtime errors.
+Run without `-p` to use the nearest `tsconfig.json`. For Vue template checks, enable `vueCompilerOptions.strictTemplates` in the project's tsconfig. CLI exit codes: `0` on success, `2` when the checker reports error diagnostics, and `1` for invocation or runtime failures.
 
 `--build` (`-b`) follows `references` in dependency order, once per config. Pass a solution config or one or more positional configs. `--watch` (`-w`) reruns checks after changes in project directories and can be combined with `--build`. `--emitDeclarationOnly` emits `.d.ts` and `.vue.d.ts`, not JavaScript. For declaration builds, use `--build --emitDeclarationOnly` and set output directories in each config. Watch mode does not emit declarations. Vue declaration source maps are not emitted.
 
