@@ -34,6 +34,17 @@ This is not a drop-in replacement for `vue-tsc`. Build and watch currently run f
 
 Run `npm ci && npm test` to exercise the Rust compiler on real Vue fixtures.
 
+## Experimental Vize backend
+
+For one-shot CI checks, opt in to Rust Vue code generation:
+
+```sh
+npm install -D --save-exact vize@0.790.0
+npx vue-tsrs --backend vize --noEmit -p tsconfig.app.json
+```
+
+The Vize backend runs an external mapper. Use it only with trusted projects and dependencies. It accepts one leaf tsconfig without project references; continue using the default backend for watch, builds, declarations, and the JavaScript API. Vize generates and checks Vue code differently from Volar, so diagnostic parity is not guaranteed. `--fast` is separately opt-in and can change compiler behavior. See the [native mapper comparison](docs/parity/native.md).
+
 ## Compare against vue-tsc
 
 On Linux with GNU `time`, install `vue-tsc` in the project under test, then run from this repository:

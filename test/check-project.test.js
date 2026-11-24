@@ -78,6 +78,19 @@ test('CLI returns different exit codes for diagnostics and incorrect invocation'
   assert.match(invoke('--noEmit', '--emitDeclarationOnly').stderr, /cannot be combined/);
 });
 
+test('Vize is optional and experimental flags cannot affect default checks', t => {
+  const cwd = fixture(t, { 'App.vue': '<template><div /></template>' });
+  const invoke = (...args) => spawnSync(process.execPath, [cli, ...args], { cwd, encoding: 'utf8' });
+  assert.match(invoke('--fast').stderr, /requires --backend vize/);
+  assert.match(invoke('--backend', 'unknown').stderr, /expects volar or vize/);
+  for (const mode of ['--watch', '--build', '--emitDeclarationOnly']) {
+    const result = invoke('--backend', 'vize', mode);
+    assert.equal(result.status, 2);
+    assert.match(result.stderr, /one-shot no-emit/);
+  }
+  assert.equal(invoke('--backend', 'volar').status, 0);
+});
+
 test('build declaration mode emits referenced package types into their own directories', t => {
   const compilerOptions = { target: 'ES2022', module: 'ESNext', moduleResolution: 'Bundler', strict: true, composite: true, outDir: 'types' };
   const cwd = fixture(t, {

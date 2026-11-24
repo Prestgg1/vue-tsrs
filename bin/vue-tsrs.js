@@ -1,8 +1,6 @@
 #!/usr/bin/env node
 import { createRequire } from 'node:module';
 import path from 'node:path';
-import { checkProject, formatDiagnostics } from '../src/index.js';
-import { checkGraph, projectGraph, watchProjects } from '../src/projects.js';
 
 const require = createRequire(import.meta.url);
 const args = process.argv.slice(2);
@@ -11,6 +9,8 @@ try {
   let projectFlag = false;
   let noEmit = false;
   let watch = false;
+  let backend = 'volar';
+  let fast = false;
   let output;
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -18,6 +18,7 @@ try {
       output = 'Usage: vue-tsrs [-p <tsconfig or directory>] [--noEmit | --emitDeclarationOnly]\n' +
         '       vue-tsrs --build [<tsconfig or directory> ...] [--noEmit | --emitDeclarationOnly]\n' +
         'Options: -p, --project    -b, --build    -w, --watch    --outDir <directory>\n' +
+        'Experimental no-emit backend: --backend vize [--fast] (trusted projects only).\n' +
         'Checks Vue 3 SFCs and TypeScript. No output is emitted by default.\n';
     } else if (arg === '--version' || arg === '-v') {
       output = `${require('../package.json').version}\n`;
@@ -33,6 +34,11 @@ try {
       watch = true;
     } else if (arg === '--noEmit') {
       noEmit = true;
+    } else if (arg === '--backend') {
+      backend = args[++i];
+      if (!['volar', 'vize'].includes(backend)) throw new Error('--backend expects volar or vize.');
+    } else if (arg === '--fast') {
+      fast = true;
     } else if (arg === '--emitDeclarationOnly') {
       options.emitDeclarationOnly = true;
     } else if (arg === '--outDir') {
@@ -54,19 +60,30 @@ try {
     if (options.outDir && !options.emitDeclarationOnly) throw new Error('--outDir requires --emitDeclarationOnly.');
     if (options.outDir && options.build) throw new Error('Configure output directories per project when using --build.');
     if (watch && options.emitDeclarationOnly) throw new Error('--watch currently supports no-emit checking only.');
-    const report = diagnostics => {
-      process.stdout.write(formatDiagnostics(diagnostics));
-      process.exitCode = diagnostics.some(d => d.category === 1) ? 1 : 0;
-      if (watch) process.stdout.write(`vue-tsrs: ${diagnostics.length} diagnostic(s). Watching for changes.\n`);
-    };
-    if (watch) {
-      const controller = new AbortController();
-      for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => controller.abort());
-      watchProjects(options, { onResult: report, onError: reportError, closeSignal: controller.signal });
-    } else if (options.build) {
-      report(checkGraph(projectGraph(options), options));
+    if (fast && backend !== 'vize') throw new Error('--fast requires --backend vize.');
+    if (backend === 'vize' && (watch || options.build || options.emitDeclarationOnly)) {
+      throw new Error('--backend vize supports one-shot no-emit checking only.');
+    }
+    if (backend === 'vize') {
+      const { runNative } = await import('../src/native.js');
+      process.exitCode = runNative({ cwd: options.cwd, project: options.projects[0], fast });
     } else {
-      report(checkProject({ ...options, project: options.projects[0] }));
+      const { checkProject, formatDiagnostics } = await import('../src/index.js');
+      const { checkGraph, projectGraph, watchProjects } = await import('../src/projects.js');
+      const report = diagnostics => {
+        process.stdout.write(formatDiagnostics(diagnostics));
+        process.exitCode = diagnostics.some(d => d.category === 1) ? 1 : 0;
+        if (watch) process.stdout.write(`vue-tsrs: ${diagnostics.length} diagnostic(s). Watching for changes.\n`);
+      };
+      if (watch) {
+        const controller = new AbortController();
+        for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => controller.abort());
+        watchProjects(options, { onResult: report, onError: reportError, closeSignal: controller.signal });
+      } else if (options.build) {
+        report(checkGraph(projectGraph(options), options));
+      } else {
+        report(checkProject({ ...options, project: options.projects[0] }));
+      }
     }
   }
 } catch (error) {
